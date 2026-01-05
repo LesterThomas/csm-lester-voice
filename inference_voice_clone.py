@@ -102,12 +102,17 @@ def generate_speech_with_reference(
     reference_text_path,
     output_path="cloned_output.wav",
     speaker_id=0,
-    max_new_tokens=125,
+    max_new_tokens=None,
     depth_decoder_temperature=0.6,
     depth_decoder_top_k=0,
     depth_decoder_top_p=0.9,
 ):
-    """Generate speech using reference audio for voice cloning."""
+    """Generate speech using reference audio for voice cloning.
+    
+    Args:
+        max_new_tokens: Max audio tokens to generate. If None, automatically calculated
+                       based on text length (~12 tokens per word). Default: None.
+    """
     
     # Load reference audio
     print(f"Loading reference audio from {reference_audio_path}...")
@@ -126,6 +131,15 @@ def generate_speech_with_reference(
     
     print(f"Reference text: {utterance_text}")
     print(f"Text to synthesize: {text_to_speak}")
+    
+    # Auto-calculate max_new_tokens if not specified
+    # Rough estimate: ~3-4 audio tokens per word for natural speech
+    # CSM generates audio tokens at ~12Hz, and average speech is ~2-3 words/second
+    # So: 1 word ≈ 0.4 seconds ≈ 4.8 tokens, we use 4 tokens/word
+    if max_new_tokens is None:
+        word_count = len(text_to_speak.split())
+        max_new_tokens = max(8, word_count * 5)  # At least 8 tokens
+        print(f"Auto-calculated max_new_tokens: {max_new_tokens} (for ~{word_count} words)")
     
     # Create conversation with reference audio and new text
     conversation = [
@@ -221,8 +235,8 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=125,
-        help="Max tokens to generate (125 tokens ≈ 10 seconds)"
+        default=None,
+        help="Max audio tokens to generate. If not specified, auto-calculated (~4 tokens/word)"
     )
     parser.add_argument(
         "--speaker-id",

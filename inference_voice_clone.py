@@ -30,20 +30,58 @@ def patch_csm_processor():
 patch_csm_processor()
 
 
-def load_model_and_processor(model_path):
+def check_cuda_setup():
+    """Display CUDA setup information."""
+    print("\n=== CUDA Setup Check ===")
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"GPU count: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+    else:
+        print("\n⚠ CUDA not detected. To enable GPU acceleration:")
+        print("  1. Verify NVIDIA drivers are installed")
+        print("  2. Install PyTorch with CUDA:")
+        print("     uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121")
+    print("========================\n")
+
+
+def load_model_and_processor(model_path, force_cuda=False):
     """Load the fine-tuned model and processor."""
     print(f"Loading model from {model_path}...")
+    
+    # Check CUDA availability
+    cuda_available = torch.cuda.is_available()
+    if cuda_available:
+        device_name = torch.cuda.get_device_name(0)
+        print(f"✓ CUDA is available: {device_name}")
+    else:
+        print("✗ CUDA is not available")
+        if force_cuda:
+            print("\nERROR: CUDA forced but not available!")
+            print("Install PyTorch with CUDA support:")
+            print("  uv pip install torch --index-url https://download.pytorch.org/whl/cu121")
+            raise RuntimeError("CUDA not available but was forced")
+    
+    # Determine device and dtype
+    use_cuda = cuda_available or force_cuda
+    device = "cuda" if use_cuda else "cpu"
+    dtype = torch.float16 if use_cuda else torch.float32
+    
+    print(f"Loading model with {dtype} on {device}...")
     model = CsmForConditionalGeneration.from_pretrained(
         model_path,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=dtype,
+        device_map="auto" if use_cuda else None,
     )
     processor = AutoProcessor.from_pretrained(model_path)
     
-    if torch.cuda.is_available():
-        model = model.to("cuda")
-        print("Model loaded on CUDA")
+    if use_cuda:
+        print(f"✓ Model loaded on CUDA ({device_name})")
     else:
-        print("Model loaded on CPU")
+        print("Model loaded on CPU (slower)")
     
     return model, processor
 
@@ -108,9 +146,16 @@ def generate_speech_with_reference(
         return_tensors="pt"
     )
     
-    # Move to device
+    # Move to device and ensure correct dtype
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    inputs = inputs.to(device)
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    
+    # Convert inputs to correct device and dtype
+    inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+    # Convert float tensors to the right dtype
+    for k in inputs:
+        if isinstance(inputs[k], torch.Tensor) and inputs[k].dtype in [torch.float32, torch.float64]:
+            inputs[k] = inputs[k].to(dtype)
     
     # Generate audio
     print("Generating audio...")
@@ -181,11 +226,29 @@ def main():
         default=0,
         help="Speaker ID"
     )
+    parser.add_argument(
+        "--force-cuda",
+        action="store_true",
+        help="Force CUDA usage (error if not available)"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["cuda", "cpu", "auto"],
+        default="auto",
+        help="Device to use: cuda, cpu, or auto (default: auto)"
+    )
     
     args = parser.parse_args()
     
+    # Show CUDA setup
+    check_cuda_setup()
+    
+    # Determine CUDA usage
+    force_cuda = args.force_cuda or args.device == "cuda"
+    
     # Load model and processor
-    model, processor = load_model_and_processor(args.model)
+    model, processor = load_model_and_processor(args.model, force_cuda=force_cuda)
     
     # Generate speech
     generate_speech_with_reference(

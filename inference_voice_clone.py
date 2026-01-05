@@ -273,8 +273,12 @@ def main():
     parser.add_argument(
         "-t", "--text",
         type=str,
-        required=True,
         help="Text to synthesize"
+    )
+    parser.add_argument(
+        "-f", "--file",
+        type=str,
+        help="Path to text file to synthesize"
     )
     parser.add_argument(
         "-r", "--reference-audio",
@@ -321,6 +325,20 @@ def main():
     
     args = parser.parse_args()
     
+    # Validate that either --text or --file is provided
+    if not args.text and not args.file:
+        parser.error("Either --text (-t) or --file (-f) must be provided")
+    if args.text and args.file:
+        parser.error("Cannot use both --text (-t) and --file (-f) at the same time")
+    
+    # Read text from file if --file is provided
+    if args.file:
+        with open(args.file, 'r', encoding='utf-8') as f:
+            text_to_speak = f.read().strip()
+        print(f"Loaded text from {args.file} ({len(text_to_speak)} characters)")
+    else:
+        text_to_speak = args.text
+    
     # Show CUDA setup
     check_cuda_setup()
     
@@ -334,7 +352,7 @@ def main():
     generate_speech_with_reference(
         model=model,
         processor=processor,
-        text_to_speak=args.text,
+        text_to_speak=text_to_speak,
         reference_audio_path=args.reference_audio,
         reference_text_path=args.reference_text,
         output_path=args.output,

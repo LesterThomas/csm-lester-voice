@@ -5,8 +5,16 @@ Based on the 'Voice and style consistency' section from the notebook.
 
 import torch
 import soundfile as sf
+import warnings
 from transformers import CsmForConditionalGeneration, AutoProcessor
+from transformers.utils import logging as transformers_logging
 import argparse
+
+# Suppress transformers warnings about generation flags
+# The CSM model internally uses some parameters that aren't applicable to audio generation
+# but this doesn't affect functionality - the audio is generated correctly
+transformers_logging.set_verbosity_error()
+warnings.filterwarnings('ignore', category=UserWarning, module='transformers')
 
 
 # Monkey-patch to fix the pad_to_multiple_of issue in transformers 4.52.3
@@ -98,9 +106,6 @@ def generate_speech_with_reference(
     depth_decoder_temperature=0.6,
     depth_decoder_top_k=0,
     depth_decoder_top_p=0.9,
-    temperature=0.8,
-    top_k=50,
-    top_p=1.0,
 ):
     """Generate speech using reference audio for voice cloning."""
     
@@ -159,16 +164,15 @@ def generate_speech_with_reference(
     
     # Generate audio
     print("Generating audio...")
+    
     with torch.no_grad():
         audio_values = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
+            # Depth decoder parameters (for audio generation quality)
             depth_decoder_temperature=depth_decoder_temperature,
             depth_decoder_top_k=depth_decoder_top_k,
             depth_decoder_top_p=depth_decoder_top_p,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
             output_audio=True
         )
     

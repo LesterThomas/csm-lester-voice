@@ -6,6 +6,7 @@ Based on the 'Voice and style consistency' section from the notebook.
 import torch
 import soundfile as sf
 import warnings
+import numpy as np
 from transformers import CsmForConditionalGeneration, AutoProcessor
 from transformers.utils import logging as transformers_logging
 import argparse
@@ -94,6 +95,37 @@ def load_model_and_processor(model_path, force_cuda=False):
     return model, processor
 
 
+def trim_silence(audio, sample_rate=24000, threshold_db=-40, chunk_size=0.1):
+    """
+    Remove trailing silence from audio.
+    
+    Args:
+        audio: Audio array
+        sample_rate: Sample rate in Hz
+        threshold_db: Silence threshold in dB (default -40dB)
+        chunk_size: Chunk size in seconds to analyze (default 0.1s)
+    
+    Returns:
+        Trimmed audio array
+    """
+    # Convert threshold from dB to amplitude
+    threshold = 10 ** (threshold_db / 20)
+    
+    # Calculate chunk size in samples
+    chunk_samples = int(sample_rate * chunk_size)
+    
+    # Find the last non-silent chunk
+    for i in range(len(audio) - chunk_samples, 0, -chunk_samples):
+        chunk = audio[i:i + chunk_samples]
+        if np.abs(chunk).max() > threshold:
+            # Found non-silent audio, trim here (add small buffer)
+            trim_point = min(i + chunk_samples + int(sample_rate * 0.2), len(audio))
+            return audio[:trim_point]
+    
+    # If all silent (unlikely), return original
+    return audio
+
+
 def generate_speech_with_reference(
     model,
     processor,
@@ -109,9 +141,12 @@ def generate_speech_with_reference(
 ):
     """Generate speech using reference audio for voice cloning.
     
+    Note: The model stops generation at periods. For multi-sentence text,
+    each sentence is generated separately and concatenated.
+    
     Args:
-        max_new_tokens: Max audio tokens to generate. If None, automatically calculated
-                       based on text length (~12 tokens per word). Default: None.
+        max_new_tokens: Max audio tokens to generate per sentence. If None, automatically 
+                       calculated based on text length (~8 tokens per word). Default: None.
     """
     
     # Load reference audio
@@ -132,68 +167,95 @@ def generate_speech_with_reference(
     print(f"Reference text: {utterance_text}")
     print(f"Text to synthesize: {text_to_speak}")
     
-    # Auto-calculate max_new_tokens if not specified
-    # Rough estimate: ~3-4 audio tokens per word for natural speech
-    # CSM generates audio tokens at ~12Hz, and average speech is ~2-3 words/second
-    # So: 1 word ≈ 0.4 seconds ≈ 4.8 tokens, we use 4 tokens/word
-    if max_new_tokens is None:
-        word_count = len(text_to_speak.split())
-        max_new_tokens = max(8, word_count * 5)  # At least 8 tokens
-        print(f"Auto-calculated max_new_tokens: {max_new_tokens} (for ~{word_count} words)")
+    # Split text by sentences (the model stops at periods)
+    import re
+    sentences = [s.strip() + '.' for s in text_to_speak.split('.') if s.strip()]
     
-    # Create conversation with reference audio and new text
-    conversation = [
-        {
-            "role": str(speaker_id),
-            "content": [
-                {"type": "text", "text": utterance_text},
-                {"type": "audio", "path": utterance}
-            ]
-        },
-        {
-            "role": str(speaker_id),
-            "content": [{"type": "text", "text": text_to_speak}]
-        },
-    ]
+    if len(sentences) > 1:
+        print(f"Detected {len(sentences)} sentences - generating each separately...")
     
-    # Prepare inputs
-    print("Processing inputs...")
-    inputs = processor.apply_chat_template(
-        conversation,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt"
-    )
-    
-    # Move to device and ensure correct dtype
+    # Generate audio for each sentence
+    all_audio_segments = []
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     
-    # Convert inputs to correct device and dtype
-    inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-    # Convert float tensors to the right dtype
-    for k in inputs:
-        if isinstance(inputs[k], torch.Tensor) and inputs[k].dtype in [torch.float32, torch.float64]:
-            inputs[k] = inputs[k].to(dtype)
-    
-    # Generate audio
-    print("Generating audio...")
-    
-    with torch.no_grad():
-        audio_values = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            # Depth decoder parameters (for audio generation quality)
-            depth_decoder_temperature=depth_decoder_temperature,
-            depth_decoder_top_k=depth_decoder_top_k,
-            depth_decoder_top_p=depth_decoder_top_p,
-            output_audio=True
+    for i, sentence in enumerate(sentences, 1):
+        if len(sentences) > 1:
+            print(f"  Generating sentence {i}/{len(sentences)}: {sentence[:60]}{'...' if len(sentence) > 60 else ''}")
+        
+        # Auto-calculate max_new_tokens for this sentence if not specified
+        if max_new_tokens is None:
+            word_count = len(sentence.split())
+            sentence_max_tokens = max(125, word_count * 8)
+        elif max_new_tokens == -1:
+            sentence_max_tokens = 10000
+        else:
+            sentence_max_tokens = max_new_tokens
+        
+        # Create conversation for this sentence
+        conversation = [
+            {
+                "role": str(speaker_id),
+                "content": [
+                    {"type": "text", "text": utterance_text},
+                    {"type": "audio", "path": utterance}
+                ]
+            },
+            {
+                "role": str(speaker_id),
+                "content": [{"type": "text", "text": sentence}]
+            },
+        ]
+        
+        # Prepare inputs
+        inputs = processor.apply_chat_template(
+            conversation,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt"
         )
+        
+        # Convert inputs to correct device and dtype
+        inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+        # Convert float tensors to the right dtype
+        for k in inputs:
+            if isinstance(inputs[k], torch.Tensor) and inputs[k].dtype in [torch.float32, torch.float64]:
+                inputs[k] = inputs[k].to(dtype)
+        
+        # Generate audio for this sentence
+        with torch.no_grad():
+            audio_values = model.generate(
+                **inputs,
+                max_new_tokens=sentence_max_tokens,
+                depth_decoder_temperature=depth_decoder_temperature,
+                depth_decoder_top_k=depth_decoder_top_k,
+                depth_decoder_top_p=depth_decoder_top_p,
+                output_audio=True
+            )
+        
+        # Convert to numpy and trim silence
+        audio = audio_values[0].to(torch.float32).cpu().numpy()
+        audio = trim_silence(audio, sample_rate=24000)
+        all_audio_segments.append(audio)
     
-    # Convert to numpy and save
-    audio = audio_values[0].to(torch.float32).cpu().numpy()
+    # Concatenate all segments with small gaps
+    if len(all_audio_segments) > 1:
+        gap_samples = int(24000 * 0.3)  # 300ms gap between sentences
+        gap = np.zeros(gap_samples)
+        
+        combined_audio = all_audio_segments[0]
+        for audio_segment in all_audio_segments[1:]:
+            combined_audio = np.concatenate([combined_audio, gap, audio_segment])
+        
+        audio = combined_audio
+        print(f"Combined {len(all_audio_segments)} sentences with {len(gap)/24000:.2f}s gaps")
+    else:
+        audio = all_audio_segments[0]
+    
+    # Save
+    audio_length = len(audio) / 24000
     sf.write(output_path, audio, 24000)
-    print(f"✅ Audio saved to {output_path}")
+    print(f"✅ Audio saved to {output_path} ({audio_length:.2f}s)")
     
     return audio
 

@@ -1,0 +1,3 @@
+Hello, this is a test of the text to speech system. The quick brown fox jumps over the lazy dog.
+
+This script can process multi-line text files and generate natural-sounding speech from them.

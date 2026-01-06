@@ -14,6 +14,9 @@ import hashlib
 import os
 from pathlib import Path
 
+# Get the directory where this script is located (for default paths)
+SCRIPT_DIR = Path(__file__).parent.resolve()
+
 # Suppress transformers warnings about generation flags
 # The CSM model internally uses some parameters that aren't applicable to audio generation
 # but this doesn't affect functionality - the audio is generated correctly
@@ -98,18 +101,20 @@ def load_model_and_processor(model_path, force_cuda=False):
     return model, processor
 
 
-def get_cache_filename(text, cache_dir="cache"):
+def get_cache_filename(text, cache_dir=None):
     """Generate a cache filename from text content.
     
     Uses first three words and a full SHA256 hash to guarantee unique filenames.
     
     Args:
         text: The sentence text
-        cache_dir: Directory to store cached audio files
+        cache_dir: Directory to store cached audio files (defaults to SCRIPT_DIR/cache)
     
     Returns:
         Path to the cache file
     """
+    if cache_dir is None:
+        cache_dir = SCRIPT_DIR / "cache"
     # Sanitize first three words for filename
     words = text.strip().split()
     first_three = '_'.join(words[:3])[:50]  # Limit length
@@ -338,13 +343,13 @@ def main():
     parser.add_argument(
         "-r", "--reference-audio",
         type=str,
-        default="reference-audio.wav",
+        default=str(SCRIPT_DIR / "reference-audio.wav"),
         help="Path to reference audio file"
     )
     parser.add_argument(
         "-rt", "--reference-text",
         type=str,
-        default="reference-utterance.txt",
+        default=str(SCRIPT_DIR / "reference-utterance.txt"),
         help="Path to reference text file"
     )
     parser.add_argument(

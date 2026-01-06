@@ -3,6 +3,10 @@ Voice cloning inference script using CSM model with reference audio.
 Based on the 'Voice and style consistency' section from the notebook.
 """
 
+import os
+# Set UTF-8 encoding for all I/O operations
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+
 import torch
 import soundfile as sf
 import warnings
@@ -205,9 +209,61 @@ def generate_speech_with_reference(
     print(f"Reference text: {utterance_text}")
     print(f"Text to synthesize: {text_to_speak}")
     
-    # Split text by sentences (the model stops at periods)
+    # Split text by sentences using multiple delimiters
+    # Pattern splits on: . ? ! newlines, ellipses (...), semicolons, em-dashes
     import re
-    sentences = [s.strip() + '.' for s in text_to_speak.split('.') if s.strip()]
+    
+    # Common abbreviations that should not trigger sentence splits
+    abbreviations = {
+        'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'vs', 'etc', 'inc', 'co', 
+        'corp', 'ltd', 'ave', 'st', 'rd', 'blvd', 'apt', 'dept', 'esq', 'hon', 
+        'rev', 'u.s', 'us', 'u.k', 'uk', 'e.g', 'eg', 'i.e', 'ie', 'vol', 'no',
+        'fig', 'approx', 'est', 'ca', 'misc', 'viz', 'al', 'op'
+    }
+    
+    def is_abbreviation(text_before_period):
+        """Check if the text before a period is likely an abbreviation."""
+        # Get the last word before the period
+        words = text_before_period.strip().split()
+        if not words:
+            return False
+        last_word = words[-1].lower().rstrip('.')
+        return last_word in abbreviations
+    
+    # Split on sentence-ending punctuation and newlines (captures delimiters)
+    split_pattern = r'([.!?]+|\n+|\.\.\.+|;|—)'
+    parts = re.split(split_pattern, text_to_speak)
+    
+    sentences = []
+    i = 0
+    while i < len(parts):
+        text_part = parts[i].strip()
+        delimiter = parts[i + 1] if i + 1 < len(parts) else ''
+        
+        # Check if this is a false split (abbreviation)
+        if delimiter == '.' and text_part and is_abbreviation(text_part):
+            # Merge with next part
+            merged_text = parts[i] + delimiter
+            if i + 2 < len(parts):
+                merged_text += parts[i + 2]
+                parts[i + 2] = merged_text
+                i += 2
+                continue
+        
+        if text_part:  # Only add non-empty sentences
+            # Normalize delimiter: convert newlines to periods, keep others as-is
+            if delimiter.strip() == '' or '\n' in delimiter:
+                delimiter = '.'
+            elif delimiter in [';', '—', '...']:
+                delimiter = '.'  # Convert weak delimiters to periods for model
+            
+            sentences.append(text_part + delimiter)
+        
+        i += 2
+    
+    # Handle last part if it doesn't end with delimiter
+    if len(parts) % 2 == 1 and parts[-1].strip():
+        sentences.append(parts[-1].strip() + '.')
     
     if len(sentences) > 1:
         print(f"Detected {len(sentences)} sentences - generating each separately...")

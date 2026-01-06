@@ -4,12 +4,13 @@ A Python script that generates high-quality speech audio using voice cloning wit
 
 ## Features
 
-- 🎙️ **Voice Cloning:** Generate speech that matches a reference voice
-- 🎯 **High-Quality Audio:** 24kHz speech generation
-- 📝 Text-to-speech with voice style consistency
-- 🚀 GPU acceleration support (CUDA) with CPU fallback
-- 📦 Managed with uv package manager
-- 🔧 Automatic bug fixes for transformers 4.52.3
+- **Voice Cloning:** Generate speech that matches a reference voice
+- **High-Quality Audio:** 24kHz speech generation
+- **Text-to-Speech:** With voice style consistency
+- **GPU Acceleration:** CUDA support with CPU fallback
+- **Package Management:** Managed with uv package manager
+- **Bug Fixes:** Automatic patches for transformers 4.52.3
+- **Intelligent Caching:** Sentence-level caching for faster regeneration
 
 ## Installation
 
@@ -45,9 +46,14 @@ This will install all required packages:
 
 The script uses reference audio to clone voice characteristics and speaking style.
 
-**Basic usage:**
+**Basic usage with text:**
 ```bash
 uv run inference_voice_clone.py -t "Your text to synthesize"
+```
+
+**Using a text file:**
+```bash
+uv run inference_voice_clone.py -f input-text.txt
 ```
 
 **Full example with custom files:**
@@ -62,19 +68,20 @@ uv run inference_voice_clone.py \
 ### Command-Line Options
 
 ```
-usage: inference_voice_clone.py [-h] -t TEXT [-m MODEL] [-r REFERENCE_AUDIO] 
+usage: inference_voice_clone.py [-h] [-t TEXT | -f FILE] [-m MODEL] [-r REFERENCE_AUDIO] 
                                 [-rt REFERENCE_TEXT] [-o OUTPUT] 
                                 [--max-tokens MAX_TOKENS] [--speaker-id SPEAKER_ID]
 
-required arguments:
-  -t, --text TEXT              Text to synthesize (required)
+text input (one required):
+  -t, --text TEXT              Text to synthesize directly
+  -f, --file FILE              Path to text file to synthesize
 
 optional arguments:
   -m, --model MODEL            Path to model (default: lesterthomas/csm-lester-voice)
   -r, --reference-audio FILE   Reference audio file (default: reference-audio.wav)
   -rt, --reference-text FILE   Reference text file (default: reference-utterance.txt)
   -o, --output FILE            Output audio file (default: cloned_output.wav)
-  --max-tokens INT             Max tokens to generate, 125 ≈ 10 seconds (default: 125)
+  --max-tokens INT             Max tokens to generate per sentence (default: auto-calculated)
   --speaker-id INT             Speaker ID (default: 0)
 ```
 
@@ -107,7 +114,58 @@ You can use your own reference files by:
 
 4. **Audio Generation:** Produces high-quality 24kHz audio with voice consistency
 
-5. **Bug Fixes:** Automatically applies patches for known issues in transformers 4.52.3
+5. **Intelligent Caching:** Caches generated audio at the sentence level for faster regeneration
+
+6. **Bug Fixes:** Automatically applies patches for known issues in transformers 4.52.3
+
+## Caching Strategy
+
+The script implements intelligent sentence-level caching to dramatically speed up subsequent generations:
+
+### How It Works
+
+1. **Sentence Detection:** The script automatically splits input text by periods into individual sentences
+2. **Unique Identification:** Each sentence gets a unique cache key based on:
+   - First three words (for human readability)
+   - Full SHA256 hash of the text (for uniqueness)
+3. **Cache Storage:** Generated audio for each sentence is stored in the `cache/` directory
+4. **Smart Reuse:** When generating text:
+   - Already-cached sentences are loaded instantly
+   - Only new/modified sentences are generated
+   - Sentences are concatenated with natural gaps (400ms)
+
+### Benefits
+
+- **Fast Iterations:** Regenerate with minor edits almost instantly
+- **Disk Efficient:** Only unique sentences are stored
+- **Reliable:** SHA256 ensures no cache collisions
+- **Transparent:** Cache status shown during generation
+
+### Cache Management
+
+**Location:** All cached audio files are stored in `cache/`
+
+**Filename Format:** `{first_three_words}_{sha256_hash}.wav`
+
+Example: `Hello_world_this_a1b2c3d4e5f6...wav`
+
+**Clear Cache:**
+```bash
+# Remove all cached audio
+rm -rf cache/
+
+# Or selectively remove old files
+find cache/ -mtime +30 -delete  # Remove files older than 30 days
+```
+
+**Cache Statistics:**
+```bash
+# View cache size
+du -sh cache/
+
+# Count cached sentences
+ls cache/*.wav | wc -l
+```
 
 ## Examples
 
@@ -145,6 +203,22 @@ uv run inference_voice_clone.py \
   -rt path/to/your-transcript.txt \
   -o my_cloned_voice.wav
 ```
+
+### Reading From a File
+
+For longer texts or scripts, use the `-f` option to read from a file:
+
+```bash
+uv run inference_voice_clone.py \
+  -f my-script.txt \
+  -o narration.wav
+```
+
+This is particularly useful for:
+- Long-form narration
+- Book chapters or articles
+- Scripts with multiple paragraphs
+- Reusing the same text multiple times
 
 ## Requirements
 
@@ -240,8 +314,10 @@ csm-lester-voice/
 ├── inference_voice_clone.py    # Main inference script
 ├── reference-audio.wav          # Sample reference audio
 ├── reference-utterance.txt      # Sample reference transcript
+├── input-text.txt              # Sample input text file
 ├── pyproject.toml              # Python dependencies (uv)
 ├── uv.lock                     # Locked dependencies
+├── cache/                      # Cached sentence audio (auto-created)
 └── README.md                   # This file
 ```
 

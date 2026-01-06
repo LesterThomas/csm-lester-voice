@@ -10,6 +10,9 @@ import numpy as np
 from transformers import CsmForConditionalGeneration, AutoProcessor
 from transformers.utils import logging as transformers_logging
 import argparse
+import hashlib
+import os
+from pathlib import Path
 
 # Suppress transformers warnings about generation flags
 # The CSM model internally uses some parameters that aren't applicable to audio generation
@@ -93,6 +96,36 @@ def load_model_and_processor(model_path, force_cuda=False):
         print("Model loaded on CPU (slower)")
     
     return model, processor
+
+
+def get_cache_filename(text, cache_dir="cache"):
+    """Generate a cache filename from text content.
+    
+    Uses first three words and a full SHA256 hash to guarantee unique filenames.
+    
+    Args:
+        text: The sentence text
+        cache_dir: Directory to store cached audio files
+    
+    Returns:
+        Path to the cache file
+    """
+    # Sanitize first three words for filename
+    words = text.strip().split()
+    first_three = '_'.join(words[:3])[:50]  # Limit length
+    # Remove non-alphanumeric characters except underscores
+    first_three = ''.join(c if c.isalnum() or c == '_' else '_' for c in first_three)
+    
+    # Generate full SHA256 hash for uniqueness
+    text_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()
+    
+    # Create cache directory if it doesn't exist
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(exist_ok=True)
+    
+    # Construct filename
+    filename = f"{first_three}_{text_hash}.wav"
+    return cache_path / filename
 
 
 def trim_silence(audio, sample_rate=24000, threshold_db=-40, chunk_size=0.1):
@@ -183,64 +216,86 @@ def generate_speech_with_reference(
         if len(sentences) > 1:
             print(f"  Generating sentence {i}/{len(sentences)}: {sentence[:60]}{'...' if len(sentence) > 60 else ''}")
         
-        # Auto-calculate max_new_tokens for this sentence if not specified
-        if max_new_tokens is None:
-            word_count = len(sentence.split())
-            sentence_max_tokens = max(125, word_count * 8)
-        elif max_new_tokens == -1:
-            sentence_max_tokens = 10000
+        # Check if cached audio exists for this sentence
+        cache_file = get_cache_filename(sentence)
+        
+        if cache_file.exists():
+            # Load from cache
+            print(f"    ✓ Using cached audio: {cache_file.name}")
+            audio, cached_rate = sf.read(cache_file)
+            # Ensure 24kHz sample rate
+            if cached_rate != 24000:
+                print(f"    Warning: Cached file has {cached_rate}Hz, expected 24000Hz. Resampling...")
+                import librosa
+                audio = librosa.resample(audio, orig_sr=cached_rate, target_sr=24000)
+            all_audio_segments.append(audio)
         else:
-            sentence_max_tokens = max_new_tokens
-        
-        # Create conversation for this sentence
-        conversation = [
-            {
-                "role": str(speaker_id),
-                "content": [
-                    {"type": "text", "text": utterance_text},
-                    {"type": "audio", "path": utterance}
-                ]
-            },
-            {
-                "role": str(speaker_id),
-                "content": [{"type": "text", "text": sentence}]
-            },
-        ]
-        
-        # Prepare inputs
-        inputs = processor.apply_chat_template(
-            conversation,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt"
-        )
-        
-        # Convert inputs to correct device and dtype
-        inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-        # Convert float tensors to the right dtype
-        for k in inputs:
-            if isinstance(inputs[k], torch.Tensor) and inputs[k].dtype in [torch.float32, torch.float64]:
-                inputs[k] = inputs[k].to(dtype)
-        
-        # Generate audio for this sentence
-        with torch.no_grad():
-            audio_values = model.generate(
-                **inputs,
-                max_new_tokens=sentence_max_tokens,
-                depth_decoder_temperature=depth_decoder_temperature,
-                depth_decoder_top_k=depth_decoder_top_k,
-                depth_decoder_top_p=depth_decoder_top_p,
-                output_audio=True
+            # Generate new audio
+            print(f"    → Generating new audio...")
+            
+            # Auto-calculate max_new_tokens for this sentence if not specified
+            if max_new_tokens is None:
+                word_count = len(sentence.split())
+                sentence_max_tokens = max(125, word_count * 8)
+            elif max_new_tokens == -1:
+                sentence_max_tokens = 10000
+            else:
+                sentence_max_tokens = max_new_tokens
+            
+            # Create conversation for this sentence
+            conversation = [
+                {
+                    "role": str(speaker_id),
+                    "content": [
+                        {"type": "text", "text": utterance_text},
+                        {"type": "audio", "path": utterance}
+                    ]
+                },
+                {
+                    "role": str(speaker_id),
+                    "content": [{"type": "text", "text": sentence}]
+                },
+            ]
+            
+            # Prepare inputs
+            inputs = processor.apply_chat_template(
+                conversation,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt"
             )
-        
-        # Convert to numpy and trim silence
-        audio = audio_values[0].to(torch.float32).cpu().numpy()
-        audio = trim_silence(audio, sample_rate=24000)
-        all_audio_segments.append(audio)
+            
+            # Convert inputs to correct device and dtype
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+            # Convert float tensors to the right dtype
+            for k in inputs:
+                if isinstance(inputs[k], torch.Tensor) and inputs[k].dtype in [torch.float32, torch.float64]:
+                    inputs[k] = inputs[k].to(dtype)
+            
+            # Generate audio for this sentence
+            with torch.no_grad():
+                audio_values = model.generate(
+                    **inputs,
+                    max_new_tokens=sentence_max_tokens,
+                    depth_decoder_temperature=depth_decoder_temperature,
+                    depth_decoder_top_k=depth_decoder_top_k,
+                    depth_decoder_top_p=depth_decoder_top_p,
+                    output_audio=True
+                )
+            
+            # Convert to numpy and trim silence (post-trimmed)
+            audio = audio_values[0].to(torch.float32).cpu().numpy()
+            audio = trim_silence(audio, sample_rate=24000)
+            
+            # Save to cache at 24kHz
+            sf.write(cache_file, audio, 24000)
+            print(f"    ✓ Cached to: {cache_file.name}")
+            
+            all_audio_segments.append(audio)
     
     # Concatenate all segments with small gaps
     if len(all_audio_segments) > 1:
-        gap_samples = int(24000 * 0.3)  # 300ms gap between sentences
+        gap_samples = int(24000 * 0.4)  # 300ms gap between sentences
         gap = np.zeros(gap_samples)
         
         combined_audio = all_audio_segments[0]

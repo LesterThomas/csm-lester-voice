@@ -44,6 +44,9 @@ lora_model/
 *.m4a
 *.mp3
 
+# Cached audio
+cache/
+
 # Dataset files
 *.json
 clip_*.wav

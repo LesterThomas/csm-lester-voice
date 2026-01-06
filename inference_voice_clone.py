@@ -180,6 +180,7 @@ def generate_speech_with_reference(
     depth_decoder_temperature=0.6,
     depth_decoder_top_k=0,
     depth_decoder_top_p=0.9,
+    pause_duration=1.0,
 ):
     """Generate speech using reference audio for voice cloning.
     
@@ -209,9 +210,62 @@ def generate_speech_with_reference(
     print(f"Reference text: {utterance_text}")
     print(f"Text to synthesize: {text_to_speak}")
     
+    # Preprocess text to handle [pause] markers
+    import re
+    
+    # Split on [pause] markers and track pause durations
+    pause_segments = []
+    pause_durations = []  # Duration in seconds for each pause
+    leading_pause_duration = 0.0  # Track leading pause if present
+    trailing_pause_duration = 0.0  # Track trailing pause if present
+    
+    # Split by [pause] and count consecutive pauses
+    parts = re.split(r'(\[pause\])', text_to_speak)
+    
+    current_segment = ""
+    pause_count = 0
+    is_first_segment = True
+    
+    for part in parts:
+        if part == '[pause]':
+            pause_count += 1
+        else:
+            if part.strip():  # Non-empty text
+                if current_segment:  # We have accumulated text
+                    pause_segments.append(current_segment.strip())
+                    if pause_count > 0:
+                        pause_durations.append(pause_count * pause_duration)
+                    pause_count = 0
+                    is_first_segment = False
+                elif pause_count > 0 and is_first_segment:
+                    # Leading pause(s) before first text
+                    leading_pause_duration = pause_count * pause_duration
+                    pause_count = 0
+                    is_first_segment = False
+                current_segment = part
+    
+    # Handle trailing pauses
+    if pause_count > 0:
+        trailing_pause_duration = pause_count * pause_duration
+    
+    # Add final segment
+    if current_segment.strip():
+        pause_segments.append(current_segment.strip())
+    
+    if not pause_segments:
+        pause_segments = [text_to_speak]
+    
+    if pause_segments:
+        print(f"Detected {len(pause_segments)} pause-separated segment(s)")
+        if leading_pause_duration > 0:
+            print(f"Leading pause: {leading_pause_duration:.1f}s")
+        if pause_durations:
+            print(f"Pause durations: {[f'{d:.1f}s' for d in pause_durations]}")
+        if trailing_pause_duration > 0:
+            print(f"Trailing pause: {trailing_pause_duration:.1f}s")
+    
     # Split text by sentences using multiple delimiters
     # Pattern splits on: . ? ! newlines, ellipses (...), semicolons, em-dashes
-    import re
     
     # Common abbreviations that should not trigger sentence splits
     abbreviations = {
@@ -230,43 +284,58 @@ def generate_speech_with_reference(
         last_word = words[-1].lower().rstrip('.')
         return last_word in abbreviations
     
-    # Split on sentence-ending punctuation and newlines (captures delimiters)
-    split_pattern = r'([.!?]+|\n+|\.\.\.+|;|—)'
-    parts = re.split(split_pattern, text_to_speak)
+    def split_into_sentences(text):
+        """Split text into sentences while handling abbreviations."""
+        # Split on sentence-ending punctuation and newlines (captures delimiters)
+        split_pattern = r'([.!?]+|\n+|\.\.\.+|;|—)'
+        parts = re.split(split_pattern, text)
     
-    sentences = []
-    i = 0
-    while i < len(parts):
-        text_part = parts[i].strip()
-        delimiter = parts[i + 1] if i + 1 < len(parts) else ''
-        
-        # Check if this is a false split (abbreviation)
-        if delimiter == '.' and text_part and is_abbreviation(text_part):
-            # Merge with next part
-            merged_text = parts[i] + delimiter
-            if i + 2 < len(parts):
-                merged_text += parts[i + 2]
-                parts[i + 2] = merged_text
-                i += 2
-                continue
-        
-        if text_part:  # Only add non-empty sentences
-            # Normalize delimiter: convert newlines to periods, keep others as-is
-            if delimiter.strip() == '' or '\n' in delimiter:
-                delimiter = '.'
-            elif delimiter in [';', '—', '...']:
-                delimiter = '.'  # Convert weak delimiters to periods for model
+        sentences = []
+        i = 0
+        while i < len(parts):
+            text_part = parts[i].strip()
+            delimiter = parts[i + 1] if i + 1 < len(parts) else ''
             
-            sentences.append(text_part + delimiter)
+            # Check if this is a false split (abbreviation)
+            if delimiter == '.' and text_part and is_abbreviation(text_part):
+                # Merge with next part
+                merged_text = parts[i] + delimiter
+                if i + 2 < len(parts):
+                    merged_text += parts[i + 2]
+                    parts[i + 2] = merged_text
+                    i += 2
+                    continue
+            
+            if text_part:  # Only add non-empty sentences
+                # Normalize delimiter: convert newlines to periods, keep others as-is
+                if delimiter.strip() == '' or '\n' in delimiter:
+                    delimiter = '.'
+                elif delimiter in [';', '—', '...']:
+                    delimiter = '.'  # Convert weak delimiters to periods for model
+                elif delimiter == '':  # No delimiter at all (end of text without punctuation)
+                    delimiter = '.'
+                
+                sentences.append(text_part + delimiter)
+            
+            i += 2
         
-        i += 2
+        return sentences
     
-    # Handle last part if it doesn't end with delimiter
-    if len(parts) % 2 == 1 and parts[-1].strip():
-        sentences.append(parts[-1].strip() + '.')
+    # Process each pause segment into sentences
+    all_sentences = []
+    segment_boundaries = []  # Track which sentences end a pause segment
+    
+    for segment_idx, segment in enumerate(pause_segments):
+        segment_sentences = split_into_sentences(segment)
+        all_sentences.extend(segment_sentences)
+        # Mark the last sentence of each segment (except the last overall segment)
+        if segment_idx < len(pause_segments) - 1:
+            segment_boundaries.append(len(all_sentences) - 1)
+    
+    sentences = all_sentences
     
     if len(sentences) > 1:
-        print(f"Detected {len(sentences)} sentences - generating each separately...")
+        print(f"Detected {len(sentences)} sentences across {len(pause_segments)} segment(s) - generating each separately...")
     
     # Generate audio for each sentence
     all_audio_segments = []
@@ -354,17 +423,61 @@ def generate_speech_with_reference(
             
             all_audio_segments.append(audio)
     
-    # Concatenate all segments with small gaps
+    # Add leading pause if present
+    if leading_pause_duration > 0:
+        leading_silence = np.zeros(int(24000 * leading_pause_duration))
+        print(f"Adding {leading_pause_duration:.1f}s leading pause")
+        all_audio_segments.insert(0, leading_silence)
+    
+    # Add trailing pause if present
+    if trailing_pause_duration > 0:
+        trailing_silence = np.zeros(int(24000 * trailing_pause_duration))
+        print(f"Adding {trailing_pause_duration:.1f}s trailing pause")
+        all_audio_segments.append(trailing_silence)
+    
+    # Concatenate all segments with appropriate gaps
     if len(all_audio_segments) > 1:
-        gap_samples = int(24000 * 0.4)  # 300ms gap between sentences
-        gap = np.zeros(gap_samples)
-        
         combined_audio = all_audio_segments[0]
-        for audio_segment in all_audio_segments[1:]:
-            combined_audio = np.concatenate([combined_audio, gap, audio_segment])
+        
+        # Adjust starting index if we added leading pause
+        start_idx = 1 if leading_pause_duration > 0 else 0
+        # Calculate last sentence index (before trailing pause if present)
+        last_sentence_idx = len(all_audio_segments) - 1
+        if trailing_pause_duration > 0:
+            last_sentence_idx -= 1
+        
+        for i, audio_segment in enumerate(all_audio_segments[1:], 1):
+            # Check if this is the trailing silence
+            is_trailing_silence = (trailing_pause_duration > 0 and i == len(all_audio_segments) - 1)
+            
+            # Check if this sentence follows a pause segment boundary
+            # Adjust sentence index if we have leading pause
+            sentence_idx = (i - 1 - start_idx) if leading_pause_duration > 0 else (i - 1)
+            
+            if is_trailing_silence:
+                # No gap before trailing silence
+                gap_samples = 0
+            elif sentence_idx >= 0 and sentence_idx in segment_boundaries:
+                # This is a pause boundary - use the corresponding pause duration
+                boundary_idx = segment_boundaries.index(sentence_idx)
+                gap_duration = pause_durations[boundary_idx]
+                gap_samples = int(24000 * gap_duration)
+                print(f"  Inserting {gap_duration:.1f}s pause after sentence {i}")
+            elif leading_pause_duration == 0 or i > 1:
+                # Normal sentence boundary - use default 0.4s gap
+                # Skip gap after leading pause (already silent)
+                gap_samples = int(24000 * 0.4)
+            else:
+                gap_samples = 0  # No gap after leading silence
+            
+            if gap_samples > 0:
+                gap = np.zeros(gap_samples)
+                combined_audio = np.concatenate([combined_audio, gap, audio_segment])
+            else:
+                combined_audio = np.concatenate([combined_audio, audio_segment])
         
         audio = combined_audio
-        print(f"Combined {len(all_audio_segments)} sentences with {len(gap)/24000:.2f}s gaps")
+        print(f"Combined {len(all_audio_segments)} segments with variable gaps")
     else:
         audio = all_audio_segments[0]
     
@@ -438,6 +551,12 @@ def main():
         default="auto",
         help="Device to use: cuda, cpu, or auto (default: auto)"
     )
+    parser.add_argument(
+        "--pause-duration",
+        type=float,
+        default=1.0,
+        help="Duration in seconds for each [pause] marker (default: 1.0)"
+    )
     
     args = parser.parse_args()
     
@@ -474,6 +593,7 @@ def main():
         output_path=args.output,
         speaker_id=args.speaker_id,
         max_new_tokens=args.max_tokens,
+        pause_duration=args.pause_duration,
     )
 
 
